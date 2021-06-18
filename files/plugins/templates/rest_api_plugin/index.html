@@ -67,14 +67,8 @@
     }
 </script>
 
-<h1 style="margin-left: 10%;">Airflow REST API </h1>
+<h1 style="margin-left: 10%;">Airflow REST API Extensions</h1>
 
-<!--List of relevant documentation-->
-<h2 style="margin-left: 10%;">Documentation</h2>
-<ul style="margin-left: 10%;font-size: 16px">
-    <li><a target="_blank" href="https://airflow.apache.org/cli.html">Official Airflow CLI Documentation</a></li>
-    <li><a target="_blank" href="https://github.corp.ebay.com/beo/airflow-rest-api-plugin">REST API Plugin Documentation</a></li>
-</ul>
 
 <!--List of relevant versions-->
 <h2 style="margin-left: 10%;">Versions</h2>
@@ -85,7 +79,6 @@
 
 <!--Shows a list of all the available APIs and provides a mechanism to quickly jump to the APIs-->
 <h2 style="margin-left: 10%;">API Directory</h2>
-<p style="margin-left: 10%;font-size: 16px">Click on one of the links bellow to jump to the API form</p>
 <ul style="margin-left: 10%;font-size: 16px">
 {% for api_metadata in apis_metadata %}
     <li><a href="#{{api_metadata.name}}">{{api_metadata.name}}</a></li>

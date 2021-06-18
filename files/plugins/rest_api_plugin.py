@@ -1,5 +1,5 @@
-__author__ = 'lliu12, linhgao'
-__version__ = "1.0.0"
+__author__ = 'Vilius Valinskis'
+__version__ = "0.6.12"
 
 from airflow.models import DagBag, DagModel, DagRun, DAG
 from airflow.plugins_manager import AirflowPlugin
@@ -9,6 +9,7 @@ from airflow import settings
 from airflow.utils.state import State
 from airflow.utils import timezone
 from airflow.exceptions import TaskNotFound
+from airflow.models.serialized_dag import SerializedDagModel
 
 from flask import Blueprint, request, jsonify, Response
 from flask_admin import BaseView as AdminBaseview, expose as admin_expose
@@ -22,12 +23,14 @@ import json
 from flask_appbuilder import expose as app_builder_expose, BaseView as AppBuilderBaseView
 from flask_jwt_extended.view_decorators import jwt_required, verify_jwt_in_request
 
-"""Location of the REST Endpoint
-Note: Changing this will only effect where the messages are posted to on the web interface
-and will not change where the endpoint actually resides"""
+import types
+import importlib.machinery
+import imp
+
+
 rest_api_endpoint = "/rest_api/api"
 
-# Getting Versions and Global variables
+
 hostname = socket.gethostname()
 airflow_version = airflow.__version__
 rest_api_plugin_version = __version__
@@ -55,9 +58,6 @@ apis_metadata = [
              "form_input_type": "checkbox", "required": False},
             {"name": "pause",
              "description": "The DAG will be forced to be paused when created.",
-             "form_input_type": "checkbox", "required": False},
-            {"name": "unpause",
-             "description": "The DAG will be forced to be unpaused when created.",
              "form_input_type": "checkbox", "required": False}
         ]
     },
@@ -75,58 +75,58 @@ apis_metadata = [
             {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True}
         ]
     },
-    {
-        "name": "upload_file",
-        "description": "upload a new File to the specified folder",
-        "http_method": "POST",
-        "form_enctype": "multipart/form-data",
-        "arguments": [],
-        "post_arguments": [
-            {"name": "file", "description": "uploaded file", "form_input_type": "file", "required": True},
-            {"name": "force", "description": "Whether to forcefully upload the file if the file already exists or not",
-             "form_input_type": "checkbox", "required": False},
-            {"name": "path", "description": "the path of file", "form_input_type": "text", "required": False}
-        ]
-    },
-    {
-        "name": "dag_state",
-        "description": "Get the status of a dag run",
-        "http_method": "GET",
-        "arguments": [
-            {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
-            {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True}
-        ]
-    },
-    {
-        "name": "task_instance_detail",
-        "description": "Get the detail info of a task instance",
-        "http_method": "GET",
-        "arguments": [
-            {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
-            {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True},
-            {"name": "task_id", "description": "The id of the task", "form_input_type": "text", "required": True}
-        ]
-    },
-    {
-        "name": "restart_failed_task",
-        "description": "restart failed tasks with downstream",
-        "http_method": "GET",
-        "arguments": [
-            {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
-            {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True}
-        ]
-    },
-    {
-        "name": "kill_running_tasks",
-        "description": "kill running tasks that status in ['none', 'running']",
-        "http_method": "GET",
-        "arguments": [
-            {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
-            {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True},
-            {"name": "task_id", "description": "If task_id is none, kill all tasks, else kill one task",
-             "form_input_type": "text", "required": False}
-        ]
-    },
+    # {
+    #     "name": "upload_file",
+    #     "description": "upload a new File to the specified folder",
+    #     "http_method": "POST",
+    #     "form_enctype": "multipart/form-data",
+    #     "arguments": [],
+    #     "post_arguments": [
+    #         {"name": "file", "description": "uploaded file", "form_input_type": "file", "required": True},
+    #         {"name": "force", "description": "Whether to forcefully upload the file if the file already exists or not",
+    #          "form_input_type": "checkbox", "required": False},
+    #         {"name": "path", "description": "the path of file", "form_input_type": "text", "required": False}
+    #     ]
+    # },
+    # {
+    #     "name": "dag_state",
+    #     "description": "Get the status of a dag run",
+    #     "http_method": "GET",
+    #     "arguments": [
+    #         {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
+    #         {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True}
+    #     ]
+    # }
+    # {
+    #     "name": "task_instance_detail",
+    #     "description": "Get the detail info of a task instance",
+    #     "http_method": "GET",
+    #     "arguments": [
+    #         {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
+    #         {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True},
+    #         {"name": "task_id", "description": "The id of the task", "form_input_type": "text", "required": True}
+    #     ]
+    # }
+    # {
+    #     "name": "restart_failed_task",
+    #     "description": "restart failed tasks with downstream",
+    #     "http_method": "GET",
+    #     "arguments": [
+    #         {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
+    #         {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True}
+    #     ]
+    # }
+    # {
+    #     "name": "kill_running_tasks",
+    #     "description": "kill running tasks that status in ['none', 'running']",
+    #     "http_method": "GET",
+    #     "arguments": [
+    #         {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
+    #         {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True},
+    #         {"name": "task_id", "description": "If task_id is none, kill all tasks, else kill one task",
+    #          "form_input_type": "text", "required": False}
+    #     ]
+    # },
     {
         "name": "run_task_instance",
         "description": "create dagRun, and run some tasks, other task skip",
@@ -138,17 +138,17 @@ apis_metadata = [
              "form_input_type": "text", "required": True},
             {"name": "conf", "description": "Conf of creating dagRun", "form_input_type": "text", "required": False}
         ]
-    },
-    {
-        "name": "skip_task_instance",
-        "description": "skip one task instance",
-        "http_method": "GET",
-        "arguments": [
-            {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
-            {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True},
-            {"name": "task_id", "description": "The id of the task", "form_input_type": "text", "required": True}
-        ]
     }
+    # {
+    #     "name": "skip_task_instance",
+    #     "description": "skip one task instance",
+    #     "http_method": "GET",
+    #     "arguments": [
+    #         {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True},
+    #         {"name": "run_id", "description": "The id of the dagRun", "form_input_type": "text", "required": True},
+    #         {"name": "task_id", "description": "The id of the task", "form_input_type": "text", "required": True}
+    #     ]
+    # }
 ]
 
 
@@ -165,6 +165,40 @@ def jwt_token_secure(func):
             return jwt_required(func(arg))
 
     return jwt_secure_check
+
+def commit_dag(dag):
+    session = settings.Session()
+    dag.sync_to_db(session=session)
+
+    ser = SerializedDagModel.write_dag(dag=dag, session=session)
+    print(f"Session before: {session}")
+    session.commit()
+    print(f"Session after commit: {session}")
+
+    print(f"Serialized {ser}")
+
+    dag_model = session.query(DagModel).filter(DagModel.dag_id == dag.dag_id).first()
+    logging.info("dag_model:" + str(dag_model))
+
+    return dag_model
+
+
+def load_dag_as_module(save_file_path):
+    """Load python file as module"""
+    try:
+        loader = importlib.machinery.SourceFileLoader('module.name', save_file_path)
+        logging.info(f"Loader {loader}")
+
+        dag_file = types.ModuleType(loader.name)
+        logging.info(f"Loader {dag_file}")
+
+        loader.exec_module(dag_file)
+        logging.info(f"Loader {dag_file}")
+
+        return dag_file
+    except Exception as e:
+        logging.warning("Failed to get dag_file")
+        return None
 
 
 class ApiResponse:
@@ -256,7 +290,6 @@ class REST_API(get_baseview()):
     # Get the DagBag which has a list of all the current Dags
     @staticmethod
     def get_dagbag():
-        REST_API.get_db_dags()
         return DagBag(dag_folder=settings.DAGS_FOLDER, read_dags_from_db=False)
 
     @staticmethod
@@ -361,8 +394,6 @@ class REST_API(get_baseview()):
             final_response = self.refresh_all_dags()
         elif api == "delete_dag":
             final_response = self.delete_dag()
-        elif api == "upload_file":
-            final_response = self.upload_file()
         elif api == "dag_state":
             final_response = self.dag_state()
         elif api == "task_instance_detail":
@@ -390,55 +421,41 @@ class REST_API(get_baseview()):
         """
         logging.info("Executing custom 'deploy_dag' function")
 
-        # check if the post request has the file part
+        # Check if post has any file
         if 'dag_file' not in request.files or request.files['dag_file'].filename == '':
             logging.warning("The dag_file argument wasn't provided")
             return ApiResponse.bad_request("dag_file should be provided")
+
         dag_file = request.files['dag_file']
+        logging.info("DAG file: " + str(dag_file))
 
         force = True if self.get_argument(request, 'force') is not None else False
-        logging.info("deploy_dag force upload: " + str(force))
+        logging.info("DAG force upload: " + str(force))
 
         pause = True if self.get_argument(request, 'pause') is not None else False
-        logging.info("deploy_dag in pause state: " + str(pause))
+        logging.info("DAG deploy as paused: " + str(pause))
 
-        unpause = True if self.get_argument(request, 'unpause') is not None else False
-        logging.info("deploy_dag in unpause state: " + str(unpause))
 
-        # make sure that the dag_file is a python script
+        # Ensure that file is python script
         if dag_file and dag_file.filename.endswith(".py"):
             save_file_path = os.path.join(airflow_dags_folder, dag_file.filename)
 
             # Check if the file already exists.
             if os.path.isfile(save_file_path) and not force:
-                logging.warning("File to upload already exists")
-                return ApiResponse.bad_request("The file '" + save_file_path + "' already exists on host '" + hostname)
+                msg = "The file '" + save_file_path + "' already exists on host '" + hostname
+                logging.warning(msg)
+                return ApiResponse.bad_request(msg)
 
+            # Save file
             logging.info("Saving file to '" + save_file_path + "'")
             dag_file.save(save_file_path)
-
         else:
-            logging.warning("deploy_dag file is not a python file. It does not end with a .py.")
-            return ApiResponse.bad_request("dag_file is not a *.py file")
+            msg = "File is not a python file. It must have .py extension"
+            logging.warning(msg)
+            return ApiResponse.bad_request(msg)
 
-        try:
-            # import the DAG file that was uploaded
-            # so that we can get the DAG_ID to execute the command to pause or unpause it
 
-            import types
-            import importlib.machinery
-            import imp
-
-            loader = importlib.machinery.SourceFileLoader('module.name', save_file_path)
-            print(f"Loader {loader}")
-            dag_file = types.ModuleType(loader.name)
-            print(f"Loader {dag_file}")
-            loader.exec_module(dag_file)
-            print(f"Loader {dag_file}")
-        except Exception as e:
-            warning = "Failed to get dag_file"
-            logging.warning(warning)
-            return ApiResponse.server_error("Failed to get dag_file")
+        dag_file = load_dag_as_module(save_file_path)
 
         try:
             if dag_file is None or dag_file.dag is None:
@@ -451,35 +468,20 @@ class REST_API(get_baseview()):
             return ApiResponse.server_error("Failed to get dag from DAG File [{}]".format(dag_file))
 
         dag_id = dag_file.dag.dag_id
-        print(f"Dagid {dag_id}")
-        logging.info("dag_id: " + dag_id)
+        logging.info(f"Dagid {dag_id}")
 
-        # Refresh dag into session
+        # Get all dags
         dagbag = self.get_dagbag()
+
+        # Get current dag
         dag = dagbag.get_dag(dag_id)
+        logging.info(f"Dag {dag}")
 
-        print(f"Dag {dag}")
+        # Write/Sync dag to DB and get DAG model
+        dag_model = commit_dag(dag)
 
-        from airflow.models.serialized_dag import SerializedDagModel
-
-
-        session = settings.Session()
-        dag.sync_to_db(session=session)
-
-        ser = SerializedDagModel.write_dag(dag=dag, session=session)
-        print(f"Session before: {session}")
-        session.commit()
-        print(f"Session after commit: {session}")
-
-        print(f"Serialized {ser}")
-
-        dag_model = session.query(DagModel).filter(DagModel.dag_id == dag_id).first()
-        logging.info("dag_model:" + str(dag_model))
-        #
-        # dag_model.set_is_paused(is_paused=not unpause)
-        return ApiResponse.success({
-            "message": "DAG File [{}] has been uploaded".format(dag_file)
-        })
+        # dag_model.set_is_paused(is_paused=paused)
+        return ApiResponse.success({"message": "DAG [{}] has been successfully uploaded".format(dag_file)})
 
     @staticmethod
     def refresh_all_dags():
@@ -512,7 +514,7 @@ class REST_API(get_baseview()):
         logging.info("Executing custom 'delete_dag' function")
 
         dag_id = self.get_argument(request, 'dag_id')
-        logging.info("dag_id to delete: '" + str(dag_id) + "'")
+        logging.info(f"DAG to delete: {str(dag_id)}")
 
         try:
             dag_full_path = airflow_dags_folder + os.sep + dag_id + ".py"
@@ -522,51 +524,18 @@ class REST_API(get_baseview()):
 
             from airflow.api.common.experimental import delete_dag
             deleted_dags = delete_dag.delete_dag(dag_id, keep_records_in_log=False)
+
             if deleted_dags > 0:
-                logging.info("Deleted dag " + dag_id)
+                logging.info(f"Deleted dag {dag_id}")
             else:
                 logging.info("No dags deleted")
         except Exception as e:
-            error_message = "An error occurred while trying to delete the DAG '" + str(dag_id) + "': " + str(e)
+            error_message = f"An error occurred while trying to delete the DAG {str(dag_id)}\n{str(e)}"
             logging.error(error_message)
             return ApiResponse.server_error(error_message)
 
-        return ApiResponse.success({
-            "message": "DAG [{}] deleted".format(dag_id)
-        })
+        return ApiResponse.success({"message": "DAG [{}] deleted".format(dag_id)})
 
-    def upload_file(self):
-        """Custom Function for the upload_file API.
-        Upload files to the specified path.
-        """
-        logging.info("Executing custom 'upload_file' function")
-
-        # check if the post request has the file part
-        if 'file' not in request.files or request.files['file'] is None or request.files['file'].filename == '':
-            logging.warning("The file argument wasn't provided")
-            return ApiResponse.bad_request("file should be provided")
-        file = request.files['file']
-
-        path = self.get_argument(request, 'path')
-        if path is None:
-            path = airflow_dags_folder
-
-        force = True if self.get_argument(request, 'force') is not None else False
-        logging.info("deploy_dag force upload: " + str(force))
-
-        # save file
-        save_file_path = os.path.join(path, file.filename)
-
-        # Check if the file already exists.
-        if os.path.isfile(save_file_path) and not force:
-            logging.warning("File to upload already exists")
-            return ApiResponse.bad_request("The file '" + save_file_path + "' already exists on host '" + hostname)
-
-        logging.info("Saving file to '" + save_file_path + "'")
-        file.save(save_file_path)
-        return ApiResponse.success({
-            "message": "File [{}] has been uploaded".format(save_file_path)
-        })
 
     def dag_state(self):
         """Get dag_run from session according to dag_id and run_id,
