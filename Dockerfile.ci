@@ -39,6 +39,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
            curl \
            gnupg2 \
+           iputils-ping \
     && apt-get autoremove -yqq --purge \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -179,6 +180,7 @@ WORKDIR ${AIRFLOW_SOURCES}
 
 RUN mkdir -pv ${AIRFLOW_HOME} && \
     mkdir -pv ${AIRFLOW_HOME}/dags && \
+    mkdir -pv ${AIRFLOW_HOME}/plugins && \
     mkdir -pv ${AIRFLOW_HOME}/logs
 
 # Install BATS and its dependencies for "in container" tests
@@ -364,6 +366,7 @@ RUN SYSTEM=$(uname -s | tr '[:upper:]' '[:lower:]') \
 
 # Additional python deps to install
 ARG ADDITIONAL_PYTHON_DEPS=""
+RUN echo "Additional python deps: ${ADDITIONAL_PYTHON_DEPS}"
 
 RUN bash /scripts/docker/install_pip_version.sh; \
     if [[ -n "${ADDITIONAL_PYTHON_DEPS}" ]]; then \

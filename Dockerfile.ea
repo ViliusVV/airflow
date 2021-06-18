@@ -1,0 +1,10 @@
+FROM apache/airflow:2.1.0-python3.8
+
+RUN pip install \
+    --no-cache-dir \
+    --extra-index-url https://vilius.valinskis:vilius.valinskis@vpn.energyadvice.lt:9091/repository/ea-pip/simple \
+     Flask-Admin \
+     easaspy
+
+ADD --chown=airflow:root files/plugins/ /opt/airflow/plugins/
+

@@ -30,6 +30,7 @@
 !airflow
 !common
 !dags
+!files
 !dev
 !chart
 !docs
