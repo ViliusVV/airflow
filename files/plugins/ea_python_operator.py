@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from urllib3 import HTTPConnectionPool
 import urllib3
 
+import logging
 from airflow.exceptions import AirflowException
 from airflow.models.connection import Connection
 from airflow.hooks.base_hook import BaseHook
@@ -179,7 +180,7 @@ class EAPythonTaskOperator(BaseOperator):
 
 
         while True:
-            print("Begin processing period...")
+            logging.info("Begin processing period...")
 
             # Fetch data
             json_data: dict = self.get_task_data(calc_period=self.current_period)
@@ -187,8 +188,8 @@ class EAPythonTaskOperator(BaseOperator):
             self.total_periods = json_data["metaData"]["totalPeriods"]
             self.current_period = json_data["metaData"]["currentPeriod"]
 
-            print(f"Running period {self.current_period + 1} out of {self.total_periods}.")
-            print(f"Calculation time for period: {json_data['metaData']['calculationTime']}.")
+            logging.info(f"Running period {self.current_period + 1} out of {self.total_periods}.")
+            logging.info(f"Calculation time for period: {json_data['metaData']['calculationTime']}.")
 
             code = json_data["pythonCode"]
             json_data.pop("pythonCode")
@@ -196,6 +197,8 @@ class EAPythonTaskOperator(BaseOperator):
             data = json_data
 
             output_data = self.execute_ea_python_task(code, data, env)
+            logging.info("JSON output:")
+            logging.info(output_data)
 
             self.post_task_data(self.current_period, output_data)
 
