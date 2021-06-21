@@ -1,5 +1,5 @@
 __author__ = 'Vilius Valinskis'
-__version__ = "0.6.12"
+__version__ = "0.6.14"
 
 from airflow.models import DagBag, DagModel, DagRun, DAG
 from airflow.plugins_manager import AirflowPlugin
@@ -9,6 +9,7 @@ from airflow import settings
 from airflow.utils.state import State
 from airflow.utils import timezone
 from airflow.exceptions import TaskNotFound
+from airflow.configuration import conf
 from airflow.models.serialized_dag import SerializedDagModel
 
 from flask import Blueprint, request, jsonify, Response
@@ -37,12 +38,20 @@ rest_api_plugin_version = __version__
 
 
 # Getting configurations from airflow.cfg file
-airflow_webserver_base_url = configuration.get('webserver', 'BASE_URL')
-airflow_dags_folder = configuration.get('core', 'DAGS_FOLDER')
-rbac_authentication_enabled = True
-read_dags_from_db = True
+airflow_webserver_base_url = conf.get('webserver', 'BASE_URL')
+airflow_dags_folder = conf.get('core', 'DAGS_FOLDER')
+read_dags_from_db = False
 
 
+config_data = { "Base URL":        conf.get('WEBSERVER',        'base_url'),
+                "Proxy fix:":      conf.getboolean("WEBSERVER", 'enable_proxy_fix'),
+                "Min ser. update": conf.get('CORE',             'min_serialized_dag_update_interval'),
+                "Do not pickle":   conf.getboolean('CORE',      'donot_pickle'),
+                "Executor":        conf.get('CORE',             'executor')
+              }
+
+
+config_data.items()
 
 apis_metadata = [
     {
@@ -70,7 +79,7 @@ apis_metadata = [
     {
         "name": "delete_dag",
         "description": "Delete a DAG in the Web Server from Airflow databas and filesystem",
-        "http_method": "GET",
+        "http_method": "DELETE",
         "arguments": [
             {"name": "dag_id", "description": "The id of the dag", "form_input_type": "text", "required": True}
         ]
@@ -156,9 +165,7 @@ apis_metadata = [
 def jwt_token_secure(func):
     def jwt_secure_check(arg):
         logging.info("Rest_API_Plugin.jwt_token_secure() called")
-        if _get_user().is_anonymous is False and rbac_authentication_enabled is True:
-            return func(arg)
-        elif rbac_authentication_enabled is False:
+        if _get_user().is_anonymous is False:
             return func(arg)
         else:
             verify_jwt_in_request()
@@ -205,11 +212,11 @@ class ApiResponse:
     def __init__(self):
         pass
 
-    OK = 200
-    BAD_REQUEST = 400
-    UNAUTHORIZED = 401
-    NOT_FOUND = 404
-    SERVER_ERROR = 500
+    OK_200 = 200
+    BAD_REQUEST_400 = 400
+    UNAUTHORIZED_401 = 401
+    NOT_FOUND_404 = 404
+    SERVER_ERROR_500 = 500
 
     @staticmethod
     def standard_response(status, response_obj):
@@ -220,7 +227,7 @@ class ApiResponse:
     @staticmethod
     def success(response_obj={}):
         response_obj['status'] = 'success'
-        return ApiResponse.standard_response(ApiResponse.OK, response_obj)
+        return ApiResponse.standard_response(ApiResponse.OK_200, response_obj)
 
     @staticmethod
     def error(status, error):
@@ -230,19 +237,19 @@ class ApiResponse:
 
     @staticmethod
     def bad_request(error="Bad request"):
-        return ApiResponse.error(ApiResponse.BAD_REQUEST, error)
+        return ApiResponse.error(ApiResponse.BAD_REQUEST_400, error)
 
     @staticmethod
     def not_found(error='Not found'):
-        return ApiResponse.error(ApiResponse.NOT_FOUND, error)
+        return ApiResponse.error(ApiResponse.NOT_FOUND_404, error)
 
     @staticmethod
     def unauthorized(error='Not authorized'):
-        return ApiResponse.error(ApiResponse.UNAUTHORIZED, error)
+        return ApiResponse.error(ApiResponse.UNAUTHORIZED_401, error)
 
     @staticmethod
     def server_error(error='Server error'):
-        return ApiResponse.error(ApiResponse.SERVER_ERROR, error)
+        return ApiResponse.error(ApiResponse.SERVER_ERROR_500, error)
 
 
 class ResponseFormat:
@@ -274,10 +281,8 @@ class ResponseFormat:
 
 
 def get_baseview():
-    if rbac_authentication_enabled:
-        return AppBuilderBaseView
-    else:
-        return AdminBaseview
+    return AppBuilderBaseView
+
 
 
 class REST_API(get_baseview()):
@@ -290,7 +295,7 @@ class REST_API(get_baseview()):
     # Get the DagBag which has a list of all the current Dags
     @staticmethod
     def get_dagbag():
-        return DagBag(dag_folder=settings.DAGS_FOLDER, read_dags_from_db=False)
+        return DagBag(dag_folder=settings.DAGS_FOLDER, read_dags_from_db=read_dags_from_db)
 
     @staticmethod
     def get_db_dags():
@@ -332,17 +337,17 @@ class REST_API(get_baseview()):
                                     dags=dags,
                                     airflow_webserver_base_url=airflow_webserver_base_url,
                                     rest_api_endpoint=rest_api_endpoint,
+                                    config_data=config_data,
                                     apis_metadata=apis_metadata,
                                     airflow_version=airflow_version,
                                     rest_api_plugin_version=rest_api_plugin_version,
-                                    rbac_authentication_enabled=rbac_authentication_enabled
                                     )
 
 
     # '/api' REST Endpoint where API requests should all come in
     @csrf.exempt  # Exempt the CSRF token
-    @admin_expose('/api', methods=["GET", "POST"])  # for Flask Admin
-    @app_builder_expose('/api', methods=["GET", "POST"])  # for Flask AppBuilder
+    @admin_expose('/api', methods=["GET", "POST", "DELETE"])  # for Flask Admin
+    @app_builder_expose('/api', methods=["GET", "POST", "DELETE"])  # for Flask AppBuilder
     def api(self):
         # Get the api that you want to execute
         api = self.get_argument(request, 'api')
@@ -851,10 +856,7 @@ class REST_API(get_baseview()):
 
 
 # Creating View to be used by Plugin
-if rbac_authentication_enabled:
-    rest_api_view = {"category": "Admin", "name": "REST API Plugin", "view": REST_API()}
-else:
-    rest_api_view = REST_API(category="Admin", name="REST API Plugin")
+rest_api_view = {"category": "Admin", "name": "REST API Plugin", "view": REST_API()}
 
 # Creating Blueprint
 rest_api_bp = Blueprint(

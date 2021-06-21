@@ -8,13 +8,11 @@
 {% endblock %}
 
 {% block body %}
- {% if  rbac_authentication_enabled %}
- {% block navbar %}
-        <header class="top" role="header">
-        {% include 'appbuilder/navbar.html' %}
-        </header>
- {% endblock %}
- {%endif%}
+{% block navbar %}
+      <header class="top" role="header">
+      {% include 'appbuilder/navbar.html' %}
+      </header>
+{% endblock %}
 <!--Simple Styling is done, so its all listed here:-->
 <style type="text/css">
     th, td { padding: 4px; }
@@ -39,6 +37,14 @@
       text-align: left;
       background-color: #1B9397;
       color: white;
+    }
+
+    code {
+      font-family: Consolas,"courier new";
+      color: crimson;
+      background-color: #f1f1f1;
+      padding: 2px;
+      font-size: 105%;
     }
 </style>
 
@@ -75,6 +81,13 @@
 <ul style="margin-left: 10%;font-size:16px">
     <li>Airflow Version: {{airflow_version}}</li>
     <li>Rest API Plugin Version: {{rest_api_plugin_version}}</li>
+</ul>
+
+<h2 style="margin-left: 10%;">Config</h2>
+<ul style="margin-left: 10%;font-size: 16px">
+{% for key, value in config_data.items() %}
+    <li>{{ key }}: <code>{{ value }}</code></li>
+{% endfor %}
 </ul>
 
 <!--Shows a list of all the available APIs and provides a mechanism to quickly jump to the APIs-->
