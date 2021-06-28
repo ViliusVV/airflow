@@ -1526,8 +1526,13 @@ class Airflow(AirflowBaseView):  # noqa: D101  pylint: disable=too-many-public-m
         if request_conf:
             try:
                 run_conf = json.loads(request_conf)
+                if not isinstance(run_conf, dict):
+                    flash("Invalid JSON configuration, must be a dict", "error")
+                    return self.render_template(
+                        'airflow/trigger.html', dag_id=dag_id, origin=origin, conf=request_conf
+                    )
             except json.decoder.JSONDecodeError:
-                flash("Invalid JSON configuration", "error")
+                flash("Invalid JSON configuration, not parseable", "error")
                 return self.render_template(
                     'airflow/trigger.html', dag_id=dag_id, origin=origin, conf=request_conf
                 )
@@ -1874,10 +1879,10 @@ class Airflow(AirflowBaseView):  # noqa: D101  pylint: disable=too-many-public-m
         execution_date = args.get('execution_date')
         state = args.get('state')
 
-        upstream = to_boolean(args.get('failed_upstream'))
-        downstream = to_boolean(args.get('failed_downstream'))
-        future = to_boolean(args.get('failed_future'))
-        past = to_boolean(args.get('failed_past'))
+        upstream = to_boolean(args.get('upstream'))
+        downstream = to_boolean(args.get('downstream'))
+        future = to_boolean(args.get('future'))
+        past = to_boolean(args.get('past'))
 
         try:
             dag = current_app.dag_bag.get_dag(dag_id)
@@ -1947,10 +1952,10 @@ class Airflow(AirflowBaseView):  # noqa: D101  pylint: disable=too-many-public-m
         origin = get_safe_url(args.get('origin'))
         execution_date = args.get('execution_date')
 
-        upstream = to_boolean(args.get('failed_upstream'))
-        downstream = to_boolean(args.get('failed_downstream'))
-        future = to_boolean(args.get('failed_future'))
-        past = to_boolean(args.get('failed_past'))
+        upstream = to_boolean(args.get('upstream'))
+        downstream = to_boolean(args.get('downstream'))
+        future = to_boolean(args.get('future'))
+        past = to_boolean(args.get('past'))
 
         return self._mark_task_instance_state(
             dag_id,
@@ -1980,10 +1985,10 @@ class Airflow(AirflowBaseView):  # noqa: D101  pylint: disable=too-many-public-m
         origin = get_safe_url(args.get('origin'))
         execution_date = args.get('execution_date')
 
-        upstream = to_boolean(args.get('failed_upstream'))
-        downstream = to_boolean(args.get('failed_downstream'))
-        future = to_boolean(args.get('failed_future'))
-        past = to_boolean(args.get('failed_past'))
+        upstream = to_boolean(args.get('upstream'))
+        downstream = to_boolean(args.get('downstream'))
+        future = to_boolean(args.get('future'))
+        past = to_boolean(args.get('past'))
 
         return self._mark_task_instance_state(
             dag_id,

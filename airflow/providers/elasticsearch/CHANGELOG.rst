@@ -19,6 +19,17 @@
 Changelog
 ---------
 
+2.0.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* Updated dependencies to allow Python 3.9 support
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
 2.0.1
 .....
 
@@ -26,7 +37,7 @@ Breaking changes
 ~~~~~~~~~~~~~~~~
 
 * ``Auto-apply apply_default decorator (#15667)``
-* ``Remove support Jinja templated log_id in Elasticsearch (16465)``
+* ``Remove support Jinja templated log_id in Elasticsearch (#16465)``
 
   While undocumented, previously ``[elasticsearch] log_id`` supported a Jinja templated string.
   Support for Jinja templates has now been removed. ``log_id`` should be a template string instead,
@@ -44,11 +55,13 @@ Features
 ~~~~~~~~
 
 * ``Support remote logging in elasticsearch with filebeat 7 (#14625)``
+* ``Support non-https elasticsearch external links (#16489)``
 
 Bug fixes
 ~~~~~~~~~
 
 * ``Fix external elasticsearch logs link (#16357)``
+* ``Fix Elasticsearch external log link with &#39;&#39;json_format&#39;&#39; (#16467)``
 
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
@@ -58,6 +71,7 @@ Bug fixes
    * ``Docs: Fix url for ''Elasticsearch'' (#16275)``
    * ``Add ElasticSearch Connection Doc (#16436)``
    * ``More documentation update for June providers release (#16405)``
+   * ``Synchronizes updated changelog after buggfix release (#16464)``
 
 1.0.4
 .....

@@ -15,11 +15,13 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+# shellcheck source=scripts/ci/libraries/_script_init.sh
+. "$( dirname "${BASH_SOURCE[0]}" )/../libraries/_script_init.sh"
 
-# We do not push in the push step because we are building multiple images in the build step
-# and it is difficult to pass list of the built images from the build to push phase
-set -euo pipefail
-
-echo
-echo "Skip pushing the image. All images were built and pushed in the build hook already!"
-echo
+# We started with KubernetesExecutor. Let's run tests first
+"$( dirname "${BASH_SOURCE[0]}" )/ci_run_kubernetes_tests.sh"
+for mode in CeleryExecutor KubernetesExecutor
+do
+    kind::upgrade_airflow_with_helm "${mode}"
+    "$( dirname "${BASH_SOURCE[0]}" )/ci_run_kubernetes_tests.sh"
+done

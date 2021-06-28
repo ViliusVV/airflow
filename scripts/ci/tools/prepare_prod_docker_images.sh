@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -14,21 +15,31 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+AIRFLOW_SOURCES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../../ && pwd)"
+export AIRFLOW_SOURCES_DIR
 
-description "Airflow celery worker daemon"
+usage() {
+    local cmdname
+    cmdname="$(basename -- "$0")"
 
-start on started networking
-stop on (deconfiguring-networking or runlevel [016])
+    cat << EOF
+Usage: ${cmdname} <AIRFLOW_VERSION>
 
-respawn
-respawn limit 5 30
+Prepares prod docker images for the version specified.
 
-setuid airflow
-setgid airflow
+EOF
+}
 
-# env AIRFLOW_CONFIG=
-# env AIRFLOW_HOME=
-# export AIRFLOW_CONFIG
-# export AIRFLOW_HOME
+if [[ "$#" -ne 1 ]]; then
+    >&2 echo "You must provide Airflow version."
+    usage
+    exit 1
+fi
 
-exec usr/local/bin/airflow celery worker
+export INSTALL_AIRFLOW_VERSION="${1}"
+
+for python_version in "3.6" "3.7" "3.8" "3.9"
+do
+  export PYTHON_MAJOR_MINOR_VERSION=${python_version}
+  "${AIRFLOW_SOURCES_DIR}/scripts/ci/images/ci_build_dockerhub.sh"
+done

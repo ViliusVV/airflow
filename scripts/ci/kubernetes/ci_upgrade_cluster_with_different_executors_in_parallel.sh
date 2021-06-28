@@ -15,14 +15,21 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+LIBRARIES_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../libraries/" && pwd)
+# shellcheck source=scripts/ci/libraries/_all_libs.sh
+source "${LIBRARIES_DIR}/_all_libs.sh"
 
-# This is hook build used by DockerHub. We are also using it
-# on Travis CI to potentially rebuild (and refresh layers that
-# are not cached) Docker images that are used to run CI jobs
+export SEMAPHORE_NAME="kubernetes-tests-upgrade"
 
-_HOOK_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+initialization::set_output_color_variables
 
-# Dockerhub builds are run inside Docker container
-export SKIP_IN_CONTAINER_CHECK="true"
+parallel::make_sure_gnu_parallel_is_installed
+parallel::make_sure_python_versions_are_specified
+parallel::make_sure_kubernetes_versions_are_specified
 
-exec "${_HOOK_DIR}/../scripts/ci/images/ci_build_dockerhub.sh"
+parallel::get_maximum_parallel_k8s_jobs
+parallel::run_helm_tests_in_parallel \
+    "$(dirname "${BASH_SOURCE[0]}")/ci_upgrade_cluster_with_different_executors_single_job.sh" "${@}"
+
+# this will exit with error code in case some of the tests failed
+parallel::print_job_summary_and_return_status_code

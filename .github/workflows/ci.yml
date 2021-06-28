@@ -24,7 +24,9 @@ on:  # yamllint disable-line rule:truthy
     branches: ['main', 'v[0-9]+-[0-9]+-test']
   pull_request:
     branches: ['main', 'v[0-9]+-[0-9]+-test', 'v[0-9]+-[0-9]+-stable']
-
+permissions:
+  # All other permissions are set to none
+  contents: read
 env:
   MOUNT_SELECTED_LOCAL_SOURCES: "false"
   FORCE_ANSWER_TO_QUESTIONS: "yes"
@@ -35,7 +37,6 @@ env:
   VERBOSE: "true"
   DOCKER_CACHE: "pulled"
   USE_GITHUB_REGISTRY: "true"
-  # Might be either 'ghcr.io' or 'docker.pkg.github.com'
   GITHUB_REGISTRY: "docker.pkg.github.com"
   GITHUB_REPOSITORY: ${{ github.repository }}
   GITHUB_USERNAME: ${{ github.actor }}
@@ -48,7 +49,6 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # In builds from forks, this token is empty, and this is good because such builds do not even try
   # to push images to the registry.
-  CONTAINER_REGISTRY_TOKEN: ${{ secrets.PAT_CR }}
   GITHUB_REGISTRY_PULL_IMAGE_TAG: "${{ github.event.pull_request.head.sha || github.sha }}"
   GITHUB_REGISTRY_PUSH_IMAGE_TAG: "latest"
   INSTALL_PROVIDERS_FROM_SOURCES: "true"
@@ -320,8 +320,6 @@ jobs:
         uses: actions/checkout@v2
         with:
           persist-credentials: false
-          # Needs to fetch all history to be able to verify changelog generation
-          fetch-depth: 0
       - name: "Setup python"
         uses: actions/setup-python@v2
         with:
@@ -522,6 +520,7 @@ ${{ hashFiles('.pre-commit-config.yaml') }}"
       VERSION_SUFFIX_FOR_PYPI: ".dev0"
       GITHUB_REGISTRY: ${{ needs.ci-images.outputs.githubRegistry }}
       NON_INTERACTIVE: "true"
+      GENERATE_PROVIDERS_ISSUE: "true"
     if: needs.build-info.outputs.image-build == 'true' && needs.build-info.outputs.default-branch == 'main'
     steps:
       - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
@@ -569,6 +568,8 @@ ${{ hashFiles('.pre-commit-config.yaml') }}"
       PYTHON_MAJOR_MINOR_VERSION: ${{needs.build-info.outputs.defaultPythonVersion}}
       VERSION_SUFFIX_FOR_PYPI: ".dev0"
       GITHUB_REGISTRY: ${{ needs.ci-images.outputs.githubRegistry }}
+      NON_INTERACTIVE: "true"
+      GENERATE_PROVIDERS_ISSUE: "true"
     if: needs.build-info.outputs.image-build == 'true' && needs.build-info.outputs.default-branch == 'main'
     steps:
       - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
@@ -1097,7 +1098,80 @@ ${{ hashFiles('.pre-commit-config.yaml') }}"
           path: "./files/coverage*.xml"
           retention-days: 7
 
+  tests-helm-executor-upgrade:
+    timeout-minutes: 50
+    name: Helm Chart Executor Upgrade
+    runs-on: ${{ fromJson(needs.build-info.outputs.runsOn) }}
+    needs: [build-info, prod-images]
+
+    env:
+      RUNS_ON: ${{ fromJson(needs.build-info.outputs.runsOn) }}
+      BACKEND: postgres
+      RUN_TESTS: "true"
+      RUNTIME: "kubernetes"
+      KUBERNETES_MODE: "image"
+      EXECUTOR: "KubernetesExecutor"
+      KIND_VERSION: "${{ needs.build-info.outputs.defaultKindVersion }}"
+      HELM_VERSION: "${{ needs.build-info.outputs.defaultHelmVersion }}"
+      GITHUB_REGISTRY: ${{ needs.prod-images.outputs.githubRegistry }}
+      CURRENT_PYTHON_MAJOR_MINOR_VERSIONS_AS_STRING: >
+        ${{needs.build-info.outputs.pythonVersionsListAsString}}
+      CURRENT_KUBERNETES_VERSIONS_AS_STRING: >
+        ${{needs.build-info.outputs.kubernetesVersionsListAsString}}
+    if: needs.build-info.outputs.run-kubernetes-tests == 'true'
+    steps:
+      - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
+        uses: actions/checkout@v2
+        with:
+          persist-credentials: false
+      - name: "Setup python"
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ needs.build-info.outputs.defaultPythonVersion }}
+      - name: "Free space"
+        run: ./scripts/ci/tools/ci_free_space_on_ci.sh
+      - name: "Get all PROD images"
+        run: ./scripts/ci/images/ci_wait_for_and_verify_all_prod_images.sh
+      - name: "Cache virtualenv for kubernetes testing"
+        uses: actions/cache@v2
+        with:
+          path: ".build/.kubernetes_venv"
+          key: "kubernetes-${{ needs.build-info.outputs.defaultPythonVersion }}\
+  -${{needs.build-info.outputs.kubernetesVersionsListAsString}}
+  -${{needs.build-info.outputs.pythonVersionsListAsString}}
+  -${{ hashFiles('setup.py','setup.cfg') }}"
+          restore-keys: "kubernetes-${{ needs.build-info.outputs.defaultPythonVersion }}-\
+  -${{needs.build-info.outputs.kubernetesVersionsListAsString}}
+  -${{needs.build-info.outputs.pythonVersionsListAsString}}"
+      - name: "Cache bin folder with tools for kubernetes testing"
+        uses: actions/cache@v2
+        with:
+          path: ".build/kubernetes-bin"
+          key: "kubernetes-binaries
+  -${{ needs.build-info.outputs.defaultKindVersion }}\
+  -${{ needs.build-info.outputs.defaultHelmVersion }}"
+          restore-keys: "kubernetes-binaries"
+      - name: "Kubernetes Helm Chart Executor Upgrade Tests"
+        run: ./scripts/ci/kubernetes/ci_upgrade_cluster_with_different_executors_in_parallel.sh
+      - name: "Upload KinD logs"
+        uses: actions/upload-artifact@v2
+        if: failure()
+        with:
+          name: >
+            kind-logs-
+          path: /tmp/kind_logs_*
+          retention-days: 7
+      - name: "Upload artifact for coverage"
+        uses: actions/upload-artifact@v2
+        with:
+          name: >
+            coverage-k8s-
+          path: "./files/coverage*.xml"
+          retention-days: 7
+
   push-prod-images-to-github-registry:
+    permissions:
+      packages: write
     timeout-minutes: 10
     name: "Push PROD images as cache to GitHub Registry"
     runs-on: ${{ fromJson(needs.build-info.outputs.runsOn) }}
@@ -1112,7 +1186,6 @@ ${{ hashFiles('.pre-commit-config.yaml') }}"
       - tests-kubernetes
       - prod-images
       - docs
-    # TODO: Generalize me (find a better way to select matching branches)
     if: >
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v1-10-test' ||
       github.ref == 'refs/heads/v2-0-test' || github.ref == 'refs/heads/v2-1-test') &&
@@ -1160,6 +1233,8 @@ ${{ hashFiles('.pre-commit-config.yaml') }}"
           PUSH_PYTHON_BASE_IMAGE: ${{ steps.push-python-image.outputs.wanted}}
 
   push-ci-images-to-github-registry:
+    permissions:
+      packages: write
     timeout-minutes: 10
     name: "Push CI images as cache to GitHub Registry"
     runs-on: ${{ fromJson(needs.build-info.outputs.runsOn) }}
@@ -1174,7 +1249,6 @@ ${{ hashFiles('.pre-commit-config.yaml') }}"
       - tests-kubernetes
       - ci-images
       - docs
-    # TODO: Generalize me (find a better way to select matching branches)
     if: >
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v1-10-test' ||
       github.ref == 'refs/heads/v2-0-test' || github.ref == 'refs/heads/v2-1-test') &&
@@ -1204,6 +1278,8 @@ ${{ hashFiles('.pre-commit-config.yaml') }}"
         run: ./scripts/ci/images/ci_push_ci_images.sh
 
   constraints:
+    permissions:
+      contents: write
     timeout-minutes: 10
     name: "Constraints"
     runs-on: ${{ fromJson(needs.build-info.outputs.runsOn) }}
@@ -1224,7 +1300,6 @@ ${{ hashFiles('.pre-commit-config.yaml') }}"
       GITHUB_REGISTRY: ${{ needs.ci-images.outputs.githubRegistry }}
       CURRENT_PYTHON_MAJOR_MINOR_VERSIONS_AS_STRING: ${{needs.build-info.outputs.pythonVersionsListAsString}}
     # Only run it for direct pushes
-    # TODO: Generalize me (find a better way to select matching branches)
     if: >
       github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v1-10-test' ||
       github.ref == 'refs/heads/v2-0-test' || github.ref == 'refs/heads/v2-1-test'

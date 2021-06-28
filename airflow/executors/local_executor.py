@@ -31,7 +31,7 @@ from multiprocessing.managers import SyncManager
 from queue import Empty, Queue  # pylint: disable=unused-import  # noqa: F401
 from typing import Any, List, Optional, Tuple, Union  # pylint: disable=unused-import # noqa: F401
 
-from setproctitle import setproctitle  # pylint: disable=no-name-in-module
+from setproctitle import getproctitle, setproctitle  # pylint: disable=no-name-in-module
 
 from airflow import settings
 from airflow.exceptions import AirflowException
@@ -66,6 +66,7 @@ class LocalWorkerBase(Process, LoggingMixin):
         # We know we've just started a new process, so lets disconnect from the metadata db now
         settings.engine.pool.dispose()
         settings.engine.dispose()
+        setproctitle("airflow worker -- LocalExecutor")
         return super().run()
 
     def execute_work(self, key: TaskInstanceKey, command: CommandType) -> None:
@@ -79,12 +80,15 @@ class LocalWorkerBase(Process, LoggingMixin):
             return
 
         self.log.info("%s running %s", self.__class__.__name__, command)
+        setproctitle(f"airflow worker -- LocalExecutor: {command}")
         if settings.EXECUTE_TASKS_NEW_PYTHON_INTERPRETER:
             state = self._execute_work_in_subprocess(command)
         else:
             state = self._execute_work_in_fork(command)
 
         self.result_queue.put((key, state))
+        # Remove the command since the worker is done executing the task
+        setproctitle("airflow worker -- LocalExecutor")
 
     def _execute_work_in_subprocess(self, command: CommandType) -> str:
         try:
@@ -340,7 +344,10 @@ class LocalExecutor(BaseExecutor):
 
     def start(self) -> None:
         """Starts the executor"""
+        old_proctitle = getproctitle()
+        setproctitle("airflow executor -- LocalExecutor")
         self.manager = Manager()
+        setproctitle(old_proctitle)
         self.result_queue = self.manager.Queue()
         self.workers = []
         self.workers_used = 0
