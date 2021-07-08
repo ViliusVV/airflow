@@ -1,6 +1,10 @@
 __author__ = 'Vilius Valinskis'
-__version__ = "0.6.14"
+__version__ = "0.6.123"
 
+import base64
+import logging
+
+from airflow.hooks.base_hook import BaseHook
 from airflow.models import DagBag, DagModel, DagRun, DAG
 from airflow.plugins_manager import AirflowPlugin
 from airflow import configuration
@@ -11,22 +15,33 @@ from airflow.utils import timezone
 from airflow.exceptions import TaskNotFound
 from airflow.configuration import conf
 from airflow.models.serialized_dag import SerializedDagModel
+from airflow.exceptions import DagNotFound
+from airflow.api.common.experimental import delete_dag
+
+from typing import Any, Callable, Optional, Tuple, TypeVar, Union, cast
+from functools import wraps
 
 from flask import Blueprint, request, jsonify, Response
-from flask_admin import BaseView as AdminBaseview, expose as admin_expose
 from flask_login.utils import _get_user
 
 import airflow
 import logging
 import os
+import jwt
 import socket
 import json
 from flask_appbuilder import expose as app_builder_expose, BaseView as AppBuilderBaseView
-from flask_jwt_extended.view_decorators import jwt_required, verify_jwt_in_request
+from flask_jwt_extended.view_decorators import jwt_required, verify_jwt_in_request, _decode_jwt_from_request
+
 
 import types
 import importlib.machinery
 import imp
+
+import requests
+from urllib3.util.retry import Retry
+import time
+from requests.adapters import HTTPAdapter
 
 
 rest_api_endpoint = "/rest_api/api"
@@ -41,14 +56,19 @@ rest_api_plugin_version = __version__
 airflow_webserver_base_url = conf.get('webserver', 'BASE_URL')
 airflow_dags_folder = conf.get('core', 'DAGS_FOLDER')
 read_dags_from_db = False
+REST_EASAS_PERMISSSION = "AIRFLOW_REST"
+REQUEST_TIMEOUT = 5
 
 
 config_data = { "Base URL":        conf.get('WEBSERVER',        'base_url'),
                 "Proxy fix:":      conf.getboolean("WEBSERVER", 'enable_proxy_fix'),
                 "Min ser. update": conf.get('CORE',             'min_serialized_dag_update_interval'),
                 "Do not pickle":   conf.getboolean('CORE',      'donot_pickle'),
+                "Reload plugins":  conf.getboolean('WEBSERVER', 'reload_on_plugin_change'),
+                "Auth backend":    conf.get('API',              'auth_backend'),
                 "Executor":        conf.get('CORE',             'executor')
               }
+
 
 
 config_data.items()
@@ -160,18 +180,142 @@ apis_metadata = [
     # }
 ]
 
+class EAAuthService:
+    """Keeps state of aunthentication service"""
+
+    PUBLIC_KEY_ENDPOINT = "/rest/jwt/publicKey/"
+
+    def __init__(self):
+        self.easas_base_url = "http://localhost:8080"
+        self.easas_context_root = "/EASAS"
+
+        try:
+            self.init_connection()
+        except Exception as e:
+            logging.error("Failed to load energyadvice connection!!!")
+            logging.error(e)
+
+    def init_connection(self):
+        conn = BaseHook.get_connection("energyadvice")
+
+        self.easas_base_url = conn.host
+        self.easas_context_root = conn.schema
+
+    def _get_public_key_link(self, kid: int):
+        return f"{self.easas_base_url}{self.easas_context_root}{EAAuthService.PUBLIC_KEY_ENDPOINT}{str(kid)}"
+
+    def fetch_public_key(self, kid: int):
+        s = self.requests_retry_session()
+
+        pub_link = self._get_public_key_link(kid)
+
+        t0 = time.time()
+
+        resp = None
+        try:
+            resp = s.get(pub_link, timeout=REQUEST_TIMEOUT)
+        except Exception as x:
+            print('It failed :(', x.__class__.__name__)
+        else:
+            print('It eventually worked', resp.status_code)
+        finally:
+            t1 = time.time()
+            print('Took', t1 - t0, 'seconds')
+
+            if resp is None or resp.status_code != 200:
+                return None
+
+            pub_key = resp.text
+
+            return pub_key
+
+    def get_public_cert(self, kid: int):
+        pub_key_b64url = self.fetch_public_key(kid)
+
+        pub_key_bytes = pub_key_b64url.encode("ASCII")
+        pub_key_bytes = base64.urlsafe_b64decode(pub_key_bytes)
+
+        pub_key_b64 = base64.b64encode(pub_key_bytes).decode('ASCII')
+
+        pub_key_cert = f"""-----BEGIN PUBLIC KEY-----\n{pub_key_b64}\n-----END PUBLIC KEY-----\n"""
+
+        print(f"B64Url Pub Key: {pub_key_b64}")
+        print(f"B64 Pub Key: {pub_key_b64}")
+
+        return pub_key_cert
+
+    def veirify_jwt(self, jwt_str: str, pem_cert: str):
+        return  jwt.decode(jwt_str, pem_cert, algorithms=["ES256"])
+
+
+    # noinspection HttpUrlsUsage
+    @staticmethod
+    def requests_retry_session(
+        retries=3,
+        backoff_factor=1,
+        status_forcelist=(500, 502, 504),
+        session=None,
+    ):
+        session = session or requests.Session()
+        retry = Retry(
+            total=retries,
+            read=retries,
+            connect=retries,
+            backoff_factor=backoff_factor,
+            status_forcelist=status_forcelist,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        return session
+
+
+_EA_AUTH_SERVICE = EAAuthService()
+
 
 # Function used to validate the JWT Token
-def jwt_token_secure(func):
-    def jwt_secure_check(arg):
-        logging.info("Rest_API_Plugin.jwt_token_secure() called")
-        if _get_user().is_anonymous is False:
-            return func(arg)
-        else:
-            verify_jwt_in_request()
-            return jwt_required(func(arg))
 
-    return jwt_secure_check
+T = TypeVar("T", bound=Callable)  # pylint: disable=invalid-name
+
+def jwt_verify(function: T):
+    """Decorator for functions that require authentication"""
+
+    @wraps(function)
+    def decorated(*args, **kwargs):
+
+        header = request.headers.get("Authorization")
+        logging.info("Rest_API_Plugin.jwt_token_secure() called")
+
+        if (header is None) or ("Bearer" not in header):
+            message = "No or bad auth header"
+            logging.warning(message)
+            return ApiResponse.unauthorized(message=message)
+
+        jwt_str = header.split()[1]
+
+        header_b64 = jwt_str.split('.')[0]
+        header_decoded = base64.b64decode(header_b64.encode("ASCII") + b'==')
+        header_json = json.loads(header_decoded)
+        kid = header_json['kid']
+
+        pub_cert = _EA_AUTH_SERVICE.get_public_cert(kid)
+
+        try:
+            jwt_decoded = _EA_AUTH_SERVICE.veirify_jwt(jwt_str, pub_cert)
+        except Exception as e:
+            logging.warning("Failed JWT verification!!!")
+            logging.warning(e)
+            return ApiResponse.unauthorized(message=e)
+
+        allowed = REST_EASAS_PERMISSSION in jwt_decoded['permissions']
+
+        if(not allowed):
+            ApiResponse.unauthorized(message=f"Token does not have {REST_EASAS_PERMISSSION} claim")
+
+        return function(*args, **kwargs)
+
+    return cast(T, decorated)
+
 
 def commit_dag(dag):
     session = settings.Session()
@@ -215,6 +359,7 @@ class ApiResponse:
     OK_200 = 200
     BAD_REQUEST_400 = 400
     UNAUTHORIZED_401 = 401
+    FORBIDDEN_403 = 403
     NOT_FOUND_404 = 404
     SERVER_ERROR_500 = 500
 
@@ -236,20 +381,24 @@ class ApiResponse:
         })
 
     @staticmethod
-    def bad_request(error="Bad request"):
-        return ApiResponse.error(ApiResponse.BAD_REQUEST_400, error)
+    def bad_request(error="Bad request", message = ""):
+        return ApiResponse.error(ApiResponse.BAD_REQUEST_400, f"{error}. {message}")
 
     @staticmethod
-    def not_found(error='Not found'):
-        return ApiResponse.error(ApiResponse.NOT_FOUND_404, error)
+    def not_found(error='Not found', message = ""):
+        return ApiResponse.error(ApiResponse.NOT_FOUND_404,  f"{error}. {message}")
 
     @staticmethod
-    def unauthorized(error='Not authorized'):
-        return ApiResponse.error(ApiResponse.UNAUTHORIZED_401, error)
+    def forbidden(error='Not authorized', message = ""):
+        return ApiResponse.error(ApiResponse.UNAUTHORIZED_401, f"{error}. {message}")
 
     @staticmethod
-    def server_error(error='Server error'):
-        return ApiResponse.error(ApiResponse.SERVER_ERROR_500, error)
+    def unauthorized(error='Not authorized', message = ""):
+        return ApiResponse.error(ApiResponse.FORBIDDEN_403, f"{error}. {message}")
+
+    @staticmethod
+    def server_error(error='Server error', message = ""):
+        return ApiResponse.error(ApiResponse.SERVER_ERROR_500, f"{error}. {message}")
 
 
 class ResponseFormat:
@@ -263,6 +412,10 @@ class ResponseFormat:
             'startDate': (None if not dag_run.start_date else dag_run.start_date.strftime("%Y-%m-%dT%H:%M:%S.%f%z")),
             'endDate': (None if not dag_run.end_date else dag_run.end_date.strftime("%Y-%m-%dT%H:%M:%S.%f%z"))
         }
+
+    @staticmethod
+    def format_task_run_state(self):
+        pass
 
     @staticmethod
     def format_dag_task(task_instance):
@@ -280,12 +433,7 @@ class ResponseFormat:
         }
 
 
-def get_baseview():
-    return AppBuilderBaseView
-
-
-
-class REST_API(get_baseview()):
+class REST_API(AppBuilderBaseView):
     """API View which extends either flask AppBuilderBaseView or flask AdminBaseView"""
 
     @staticmethod
@@ -346,8 +494,8 @@ class REST_API(get_baseview()):
 
     # '/api' REST Endpoint where API requests should all come in
     @csrf.exempt  # Exempt the CSRF token
-    @admin_expose('/api', methods=["GET", "POST", "DELETE"])  # for Flask Admin
     @app_builder_expose('/api', methods=["GET", "POST", "DELETE"])  # for Flask AppBuilder
+    @jwt_verify
     def api(self):
         # Get the api that you want to execute
         api = self.get_argument(request, 'api')
@@ -387,30 +535,23 @@ class REST_API(get_baseview()):
 
         # Check to make sure that the DAG you're referring to, already exists.
         dag_bag = self.get_dagbag()
-        if dag_id is not None and dag_id not in dag_bag.dags:
-            logging.info("DAG_ID '" + str(dag_id) + "' was not found in the DagBag list '" + str(dag_bag.dags) + "'")
-            return ApiResponse.bad_request("The DAG ID '" + str(dag_id) + "' does not exist")
+        if api != "delete_dag":
+            if dag_id is not None and dag_id not in dag_bag.dags:
+                logging.info("DAG_ID '" + str(dag_id) + "' was not found in the DagBag list '" + str(dag_bag.dags) + "'")
+                return ApiResponse.bad_request("The DAG ID '" + str(dag_id) + "' does not exist")
 
         # Deciding which function to use based off the API object that was requested.
         # Some functions are custom and need to be manually routed to.
+        final_response = ApiResponse.not_found(message="API not found")
+
         if api == "deploy_dag":
             final_response = self.deploy_dag()
-        elif api == "refresh_all_dags":
-            final_response = self.refresh_all_dags()
         elif api == "delete_dag":
             final_response = self.delete_dag()
         elif api == "dag_state":
             final_response = self.dag_state()
-        elif api == "task_instance_detail":
-            final_response = self.task_instance_detail()
-        elif api == "restart_failed_task":
-            final_response = self.restart_failed_task()
-        elif api == "kill_running_tasks":
-            final_response = self.kill_running_tasks()
         elif api == "run_task_instance":
             final_response = self.run_task_instance()
-        elif api == "skip_task_instance":
-            final_response = self.skip_task_instance()
 
         return final_response
 
@@ -513,33 +654,29 @@ class REST_API(get_baseview()):
         })
 
     def delete_dag(self):
-        """Custom Function for the delete_dag API.
-        Delete dag according to dag id，and delete the dag file
-        """
-        logging.info("Executing custom 'delete_dag' function")
+        """Delete DAG form Airflow DB and its file"""
+        logging.info("Executing 'dag_delete' function")
 
         dag_id = self.get_argument(request, 'dag_id')
         logging.info(f"DAG to delete: {str(dag_id)}")
 
+        dag_full_path = airflow_dags_folder + os.sep + dag_id + ".py"
+
+        if os.path.exists(dag_full_path):
+            os.remove(dag_full_path)
+
         try:
-            dag_full_path = airflow_dags_folder + os.sep + dag_id + ".py"
-
-            if os.path.exists(dag_full_path):
-                os.remove(dag_full_path)
-
-            from airflow.api.common.experimental import delete_dag
             deleted_dags = delete_dag.delete_dag(dag_id, keep_records_in_log=False)
+        except DagNotFound as e:
+            logging.info("DAG not found to delete")
+            return ApiResponse.success({"message": "No such DAG [{}] to delete".format(dag_id)})
 
-            if deleted_dags > 0:
-                logging.info(f"Deleted dag {dag_id}")
-            else:
-                logging.info("No dags deleted")
-        except Exception as e:
-            error_message = f"An error occurred while trying to delete the DAG {str(dag_id)}\n{str(e)}"
-            logging.error(error_message)
-            return ApiResponse.server_error(error_message)
-
-        return ApiResponse.success({"message": "DAG [{}] deleted".format(dag_id)})
+        if deleted_dags > 0:
+            logging.info(f"Deleted dag {dag_id}")
+            return ApiResponse.success({"message": "DAG [{}] deleted".format(dag_id)})
+        else:
+            logging.info("No dags deleted")
+            return ApiResponse.success({"message": "No such DAG [{}] to delete".format(dag_id)})
 
 
     def dag_state(self):
@@ -765,6 +902,7 @@ class REST_API(get_baseview()):
             except ValueError:
                 return ApiResponse.error('Failed', 'Invalid JSON configuration')
 
+        # Check if DAG run allready exists
         dr = DagRun.find(dag_id=dag_id, run_id=run_id)
         if dr:
             return ApiResponse.not_found('run_id {} already exists'.format(run_id))
@@ -798,6 +936,9 @@ class REST_API(get_baseview()):
         )
 
         tis = dag_run.get_task_instances()
+
+        # We want to run only single task of DAG,
+        # so other DAG tasks are marked as SUCCESS in advance and not run
         for ti in tis:
             if ti.task_id in task_list:
                 ti.state = None
@@ -875,6 +1016,7 @@ rest_api_blueprint = Blueprint(
 )
 
 
+# Airflow plugin init
 class REST_API_Plugin(AirflowPlugin):
     name = "rest_api"
     operators = []

@@ -8,28 +8,35 @@ from tempfile import TemporaryDirectory
 from urllib3 import HTTPConnectionPool
 import urllib3
 
+import requests
+from urllib3.util.retry import Retry
+
 import logging
 from airflow.exceptions import AirflowException
 from airflow.models.connection import Connection
 from airflow.hooks.base_hook import BaseHook
 from airflow.models.baseoperator import BaseOperator
+from airflow.models.dag import DagContext
 from airflow.utils.operator_helpers import context_to_airflow_vars
+from requests.adapters import HTTPAdapter
+
 
 
 class EAPythonTaskOperator(BaseOperator):
+    REQUEST_TIMEOUT = 5
     CONNECT_TIMEOUT = 10
     CONNECT_TRIES = 10
     FETCH_TIMEOUT = 30
 
     BASE_URL = ""
     CONTEXT_ROOT = ""
+    SECRET = ""
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.output_encoding: str = "utf-8"
         self.current_period: int = 0
         self.total_periods: int = 1
-        self.now_time = int(time.time())
         self.sub_process = None
 
     def get_task_link(self, task_period):
@@ -46,59 +53,72 @@ class EAPythonTaskOperator(BaseOperator):
 
         EAPythonTaskOperator.BASE_URL = conn.host
         EAPythonTaskOperator.CONTEXT_ROOT = conn.schema
+        EAPythonTaskOperator.SECRET = conn.password
 
+    @staticmethod
+    def requests_retry_session(
+        retries=10,
+        backoff_factor=1,
+        status_forcelist=(500, 502, 504),
+        session=None,
+    ):
+        session = session or requests.Session()
+        retry = Retry(
+            total=retries,
+            read=retries,
+            connect=retries,
+            redirect=retries,
+            status=retries,
+            backoff_factor=backoff_factor,
+            status_forcelist=status_forcelist,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        return session
 
-    def get_task_data(self, calc_period):
+    def get_task_data(self, calc_period, session):
         """Get task's data form EA endpoint"""
 
         task_link = self.get_task_link(task_period=calc_period)
 
         print(f"Beginning to fetch task data for airflow task {self.dag_id}:{self.task_id} at {task_link}")
-
-        http_pool = urllib3.PoolManager()
-
         print("Fetching!")
-        r = http_pool.urlopen('GET', EAPythonTaskOperator.BASE_URL + task_link, timeout=EAPythonTaskOperator.FETCH_TIMEOUT, redirect=True)
 
-        resp = r.data.decode("UTF-8")
+        headers = self.get_bearer_header()
+        r = session.get(EAPythonTaskOperator.BASE_URL + task_link, headers=headers, timeout=EAPythonTaskOperator.FETCH_TIMEOUT)
 
-        if r.status != 200:
-            print("Data fetch failed!")
+        if r.status_code != 200:
+            logging.error(f"Data fetch failed! Error {r.status_code}")
             exit(500)
 
-        json_data = json.loads(resp)
+        json_data = r.json()
 
         print("Data fetch finished! JSON: ")
-        # print(json_data)
 
         return json_data
 
-    def post_task_data(self, calc_period, jsonData):
+    def post_task_data(self, calc_period, jsonData, session):
         """Post task data back to server"""
 
         task_link = self.get_task_link(task_period=calc_period)
 
-        print("Getting ready to post data...")
+        logging.info("Posting data...")
+        headers = self.get_bearer_header({"Content-Type": "application/json"})
 
-        http_pool = urllib3.PoolManager()
+        r = session.post(EAPythonTaskOperator.BASE_URL + task_link,
+                         headers=headers,
+                         data=jsonData.encode("utf-8"),
+                         timeout=EAPythonTaskOperator.FETCH_TIMEOUT)
 
-        print("Posting data...")
-        headers = {"Content-Type": "application/json"}
-        r = http_pool.urlopen('POST', EAPythonTaskOperator.BASE_URL + task_link, headers=headers, body=jsonData.encode("utf-8"),
-                              timeout=EAPythonTaskOperator.FETCH_TIMEOUT)
-        status = r.status
-
-
-        if status != 200:
-            print("Error occurred posting data to server!")
+        if r.status_code != 200:
+            logging.error(f"Error occurred posting data to server! Error: {r.status_code}")
             exit(500)
 
-    def get_connection_pool(self):
-        print("Creating pool!")
-        http_pool = HTTPConnectionPool(self.BASE_URL, timeout=EAPythonTaskOperator.CONNECT_TIMEOUT,
-                                       retries=EAPythonTaskOperator.CONNECT_TRIES)
-
-        return http_pool
+    def get_bearer_header(self, additional_headers = {}):
+        auth = {"Authorization": f"Bearer {EAPythonTaskOperator.SECRET}"}
+        final_header = {**auth, **additional_headers}
+        return final_header
 
     @staticmethod
     def create_file(file_path, string):
@@ -129,7 +149,7 @@ class EAPythonTaskOperator(BaseOperator):
         folder_prefix = f"airflow__{self.dag_id}__{self.task_id}__"
 
         with TemporaryDirectory(prefix=folder_prefix) as tmp_dir:
-            print(f"Using tempdir {tmp_dir}")
+            logging.info(f"Using tempdir {tmp_dir}")
 
             python_file_path = f"{tmp_dir}/code.py"
             input_file_path = f"{tmp_dir}/input.json"
@@ -151,39 +171,46 @@ class EAPythonTaskOperator(BaseOperator):
                 preexec_fn=self.pre_exec,
             )
 
-            print('Python process output start:')
+            logging.info('Python process output start:')
             for raw_line in iter(self.sub_process.stdout.readline, b''):
                 line = raw_line.decode(self.output_encoding).rstrip()
-                print(line)
-            print('Python process output end.')
+                logging.info(line)
+            logging.info('Python process output end.')
 
             self.sub_process.wait()
 
-            print(f'Python process exited with code {self.sub_process.returncode}')
+            logging.info(f'Python process exited with code {self.sub_process.returncode}')
 
             if self.sub_process.returncode != 0:
-                raise AirflowException('EA Python task failed. The task returned a non-zero exit code.')
+                logging.error('EA Python task failed. The task returned a non-zero exit code.')
+                exit(500)
 
             output_json = self.read_file(output_file_path)
 
             return output_json
 
-    def execute(self, context):
-        print("EAPythonTaskOperator started...")
+    def execute(self, context: dict):
+        """Main opeerator entry point. Task execution starts here"""
+        logging.info("EAPythonTaskOperator started...")
 
         self.init_connection()
+
+        # Get DAG start date.
+        self.now_time = context['execution_date'].int_timestamp
 
         # Setup environment variables if needed
         env = os.environ.copy()
         airflow_context_vars = context_to_airflow_vars(context, in_env_var_format=True)
         env.update(airflow_context_vars)
 
+        session = self.requests_retry_session()
+
 
         while True:
             logging.info("Begin processing period...")
 
             # Fetch data
-            json_data: dict = self.get_task_data(calc_period=self.current_period)
+            json_data: dict = self.get_task_data(calc_period=self.current_period, session=session)
 
             self.total_periods = json_data["metaData"]["totalPeriods"]
             self.current_period = json_data["metaData"]["currentPeriod"]
@@ -200,7 +227,7 @@ class EAPythonTaskOperator(BaseOperator):
             logging.info("JSON output:")
             logging.info(output_data)
 
-            self.post_task_data(self.current_period, output_data)
+            self.post_task_data(self.current_period, output_data, session=session)
 
             self.current_period += 1
 
