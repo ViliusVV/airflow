@@ -20,73 +20,105 @@ from airflow.models.dag import DagContext
 from airflow.utils.operator_helpers import context_to_airflow_vars
 from requests.adapters import HTTPAdapter
 
-
+# 172.23.145.110
 
 class EAPythonTaskOperator(BaseOperator):
-    REQUEST_TIMEOUT = 5
-    CONNECT_TIMEOUT = 10
-    CONNECT_TRIES = 10
+    RETRIES = 10
     FETCH_TIMEOUT = 30
-
-    BASE_URL = ""
-    CONTEXT_ROOT = ""
-    SECRET = ""
+    POST_TIMEOUT = 60
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
+
+        self.base_url = ""
+        self.context_root = ""
+        self.secret = ""
+
         self.output_encoding: str = "utf-8"
+
         self.current_period: int = 0
         self.total_periods: int = 1
+
+        self.is_started = False
+
         self.sub_process = None
-
-    def get_task_link(self, task_period):
-        """Get tasks data link"""
-
-        calc_id = str(task_period)
-
-        url = f"{self.CONTEXT_ROOT}/rest/airflow/dag/{self.dag_id}/{self.task_id}/jobData?calcPeriod={calc_id}&calcTimestamp={self.now_time}"
-
-        return url
 
     def init_connection(self):
         conn = BaseHook.get_connection("energyadvice")
 
-        EAPythonTaskOperator.BASE_URL = conn.host
-        EAPythonTaskOperator.CONTEXT_ROOT = conn.schema
-        EAPythonTaskOperator.SECRET = conn.password
+        self.base_url = conn.host
+        self.context_root = conn.schema
+        self.secret = conn.password
 
-    @staticmethod
-    def requests_retry_session(
-        retries=10,
-        backoff_factor=1,
-        status_forcelist=(500, 502, 504),
-        session=None,
-    ):
-        session = session or requests.Session()
-        retry = Retry(
-            total=retries,
-            read=retries,
-            connect=retries,
-            redirect=retries,
-            status=retries,
-            backoff_factor=backoff_factor,
-            status_forcelist=status_forcelist,
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
-        return session
+    def get_base_url(self):
+        return f"{self.base_url}{self.context_root}"
 
-    def get_task_data(self, calc_period, session):
-        """Get task's data form EA endpoint"""
+    def get_rest_base_url(self):
+        return f"{self.get_base_url()}/rest/airflow/dag"
 
-        task_link = self.get_task_link(task_period=calc_period)
 
-        print(f"Beginning to fetch task data for airflow task {self.dag_id}:{self.task_id} at {task_link}")
-        print("Fetching!")
+    def get_config_link(self):
+        return f"{self.get_rest_base_url()}/{self.dag_id}/{self.task_id}/jobConfig"
+
+    def get_task_data_link(self, task_period):
+        """Get tasks data link"""
+
+        calc_id = str(task_period)
+
+        url = f"{self.get_rest_base_url()}/{self.dag_id}/{self.task_id}/getJobData?calcPeriod={calc_id}&calcTimestamp={self.now_time}"
+
+        return url
+
+    def get_post_task_data_link(self, task_period):
+        """Get tasks data link"""
+
+        calc_id = str(task_period)
+
+        url = f"{self.get_rest_base_url()}/{self.dag_id}/{self.task_id}/postJobData?calcPeriod={calc_id}&calcTimestamp={self.now_time}"
+
+        return url
+
+    def get_bearer_header(self, additional_headers = {}):
+        auth = {"Authorization": f"Bearer {self.secret}"}
+        final_header = {**auth, **additional_headers}
+        return final_header
+
+    def get_task_config(self, session: requests.sessions.Session):
+        """Get task's config from EA endpoint"""
+
+        endpoint = self.get_config_link();
+
+        logging.info(f"Getting config for airflow task {self.dag_id}:{self.task_id} at {endpoint}...")
 
         headers = self.get_bearer_header()
-        r = session.get(EAPythonTaskOperator.BASE_URL + task_link, headers=headers, timeout=EAPythonTaskOperator.FETCH_TIMEOUT)
+        r = session.get(endpoint,
+                        headers=headers,
+                        timeout=EAPythonTaskOperator.FETCH_TIMEOUT)
+
+        if r.status_code != 200:
+            logging.error(f"Failed to get airflow task config. Error {r.status_code}")
+            exit(500)
+
+        json_data = r.json()
+
+        logging.info(f"Task config fetch finished! JSON:\n{json_data}")
+
+        return json_data
+
+    def get_task_data(self, calc_period, jobDataMap, session: requests.sessions.Session):
+        """Get task's data form EA endpoint"""
+
+        endpoint = self.get_task_data_link(task_period=calc_period)
+
+        logging.info(f"Fetching task data for airflow task {self.dag_id}:{self.task_id} at {endpoint}...")
+
+        jdmStr = str(jobDataMap)
+
+        headers = self.get_bearer_header({"Content-Type": "application/json"})
+        r = session.post(endpoint,
+                        headers=headers,
+                        data=jdmStr,
+                        timeout=EAPythonTaskOperator.FETCH_TIMEOUT)
 
         if r.status_code != 200:
             logging.error(f"Data fetch failed! Error {r.status_code}")
@@ -94,47 +126,33 @@ class EAPythonTaskOperator(BaseOperator):
 
         json_data = r.json()
 
-        print("Data fetch finished! JSON: ")
+        logging.info(f"Data fetch finished! JSON:\n{json_data}")
 
         return json_data
 
-    def post_task_data(self, calc_period, jsonData, session):
+    def post_task_data(self, calc_period, jobDataMap, jsonData, session: requests.sessions.Session):
         """Post task data back to server"""
 
-        task_link = self.get_task_link(task_period=calc_period)
+        endpoint = self.get_post_task_data_link(task_period=calc_period)
 
         logging.info("Posting data...")
-        headers = self.get_bearer_header({"Content-Type": "application/json"})
 
-        r = session.post(EAPythonTaskOperator.BASE_URL + task_link,
+        dataStr = ""
+
+        # Json data empty
+        if(jsonData != None):
+            jsonData['jdm'] = jobDataMap
+            dataStr = str(jsonData)
+
+        headers = self.get_bearer_header({"Content-Type": "application/json"})
+        r = session.post(endpoint,
                          headers=headers,
-                         data=jsonData.encode("utf-8"),
-                         timeout=EAPythonTaskOperator.FETCH_TIMEOUT)
+                         data=dataStr.encode("utf-8"),
+                         timeout=EAPythonTaskOperator.POST_TIMEOUT)
 
         if r.status_code != 200:
             logging.error(f"Error occurred posting data to server! Error: {r.status_code}")
             exit(500)
-
-    def get_bearer_header(self, additional_headers = {}):
-        auth = {"Authorization": f"Bearer {EAPythonTaskOperator.SECRET}"}
-        final_header = {**auth, **additional_headers}
-        return final_header
-
-    @staticmethod
-    def create_file(file_path, string):
-        """Create file used for output data"""
-
-        with open(file_path, "w") as file:
-            file.write(string)
-
-    @staticmethod
-    def read_file(file_path):
-        """Read file used for input data"""
-
-        with open(file_path, "r") as file:
-            out_json = file.read()
-
-        return out_json
 
     def pre_exec(self):
         # Restore default signal disposition and invoke setsid
@@ -186,6 +204,15 @@ class EAPythonTaskOperator(BaseOperator):
                 exit(500)
 
             output_json = self.read_file(output_file_path)
+            try:
+                # Handle empty outputfile
+                if len(output_json) != 0:
+                    output_json = json.loads(output_json)
+                else:
+                    output_json = None
+            except:
+                loggin.error(f"Error parsing output JSON!")
+                exit(500)
 
             return output_json
 
@@ -193,41 +220,60 @@ class EAPythonTaskOperator(BaseOperator):
         """Main opeerator entry point. Task execution starts here"""
         logging.info("EAPythonTaskOperator started...")
 
-        self.init_connection()
-
-        # Get DAG start date.
-        self.now_time = context['execution_date'].int_timestamp
-
         # Setup environment variables if needed
+        logging.info("Setting up env...")
         env = os.environ.copy()
         airflow_context_vars = context_to_airflow_vars(context, in_env_var_format=True)
         env.update(airflow_context_vars)
 
+        # Get DAG start date.
+        self.now_time = context['execution_date'].int_timestamp
+
+
+        # Get EASAS connection
+        logging.info("Initializing connection...")
+        self.init_connection()
         session = self.requests_retry_session()
+
+        # Get task config
+        jobDataMap: dict = self.get_task_config(session)
+
+        if(len(jobDataMap) == 0):
+            logging.warning("Task config is empty!")
+            return
 
 
         while True:
-            logging.info("Begin processing period...")
+            logging.info(f"Begin processing period {self.current_period + 1}...")
 
-            # Fetch data
-            json_data: dict = self.get_task_data(calc_period=self.current_period, session=session)
+            # Fetch data for task
+            json_data: dict = self.get_task_data(calc_period=self.current_period,
+                                                 jobDataMap=jobDataMap,
+                                                 session=session)
 
-            self.total_periods = json_data["metaData"]["totalPeriods"]
-            self.current_period = json_data["metaData"]["currentPeriod"]
+            # Only get total periods on first task
+            if(not self.is_started):
+                logging.info("First task period. Caching total periods...")
+                self.total_periods = json_data["metaData"]["totalPeriods"]
+                self.is_started = True
+
+            # self.current_period = json_data["metaData"]["currentPeriod"]
 
             logging.info(f"Running period {self.current_period + 1} out of {self.total_periods}.")
             logging.info(f"Calculation time for period: {json_data['metaData']['calculationTime']}.")
 
-            code = json_data["pythonCode"]
-            json_data.pop("pythonCode")
+            # Get code and remove form json
+            code = json_data.pop("pythonCode")
 
-            data = json_data
+            # Execute python file and get data/json
+            output_data = self.execute_ea_python_task(code, json_data, env)
+            logging.info(f"JSON output:\n{output_data}")
 
-            output_data = self.execute_ea_python_task(code, data, env)
-            logging.info("JSON output:")
-            logging.info(output_data)
-
-            self.post_task_data(self.current_period, output_data, session=session)
+            # Send calculated data back to server
+            self.post_task_data(calc_period=self.current_period,
+                                jobDataMap=jobDataMap,
+                                jsonData=output_data,
+                                session=session)
 
             self.current_period += 1
 
@@ -235,3 +281,41 @@ class EAPythonTaskOperator(BaseOperator):
                 break
 
         print("EAPythonTaskOperator ended...")
+
+    @staticmethod
+    def create_file(file_path, string):
+        """Create file used for output data"""
+
+        with open(file_path, "w") as file:
+            file.write(string)
+
+    @staticmethod
+    def read_file(file_path):
+        """Read file used for input data"""
+
+        with open(file_path, "r") as file:
+            out_json = file.read()
+
+        return out_json
+
+    @staticmethod
+    def requests_retry_session(
+        retries=RETRIES,
+        backoff_factor=1,
+        status_forcelist=(500, 502, 504),
+        session=None,
+    ):
+        session = session or requests.Session()
+        retry = Retry(
+            total=retries,
+            read=retries,
+            connect=retries,
+            redirect=retries,
+            status=retries,
+            backoff_factor=backoff_factor,
+            status_forcelist=status_forcelist,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        return session

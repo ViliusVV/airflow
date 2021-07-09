@@ -1,5 +1,5 @@
 __author__ = 'Vilius Valinskis'
-__version__ = "0.6.123"
+__version__ = "0.6.125"
 
 import base64
 import logging
